@@ -1,0 +1,25 @@
+{
+  "name": "fund",
+  "version": "1.0.0",
+  "description": "FundMan",
+  "main": "app.js",
+  "scripts": {
+    "dev": "node app.js",
+    "pkg": "pkg --out-path dist app.js"
+  },
+  "pkg": {
+    "assets": "node_modules/blessed/**/*"
+  },
+  "keywords": [
+    "terminal",
+    "blessed"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "bent": "^7.3.2",
+    "blessed": "^0.1.81",
+    "blessed-contrib": "^4.8.20",
+    "wcwidth": "^1.0.1"
+  }
+}
