@@ -320,8 +320,8 @@ function FundMan(opts) {
         })
 
         self.screen.on('resize', function() {
-            for(var widget of self.widgets) {
-                widget.emit('attach')
+            for(var id in self.widgets) {
+                self.widgets[id].emit('attach')
             }
             self.screen.render()
         })
