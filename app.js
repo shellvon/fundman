@@ -7,6 +7,15 @@ const bent = require('bent')
 const wcwidth = require('wcwidth')
 const events = require('events')
 const fs = require('fs')
+const chalk = require('chalk')
+const util = require('util')
+const inquirer = require('inquirer')
+const fuzzy = require('fuzzy')
+const funddb = require('./funddb')
+
+inquirer.registerPrompt('autocomplete', require('inquirer-autocomplete-prompt'))
+
+const readFile = util.promisify(fs.readFile)
 
 // 盗取自blessed-contrib, 并将长度修改为wcwidth来计算保证对齐 ^_^
 contrib.table.prototype.setData = function(tb) {
@@ -70,6 +79,16 @@ function numFmt(v, opt) {
     return tags ? `{${fg}-fg}${v}{/}` : v;
 }
 
+const fetchJson = bent('json', {'headers': {'X-Client': 'Fund-Man v0.0.1'}})
+
+function fetchJsonWithRetry(uri, retry = 5){
+    return fetchJson(uri).catch(e => {
+        if (retry > 0) {
+            return fetchJsonWithRetry(uri, retry - 1)
+        }
+        throw e
+    })
+}
 
 /**
  * {
@@ -81,121 +100,14 @@ function numFmt(v, opt) {
  * @param {Object} opts 
  */
 function FundMan(opts) {
-    this.screen = blessed.screen({
-        smartCSR: true,
-        fullUnicode: true,
-        debug: opts.debug || false,
-        title: opts.title || 'Fundman'
-    })
-    var grid = new contrib.grid({rows: opts.rows, cols: opts.cols, screen: this.screen})
-    this.eventBus = new events.EventEmitter()
 
-    let self = this;
-
-    var widgetsCfg =  [
-        {
-            id: 'table',
-            row: 0,
-            col: 0,
-            rowSpan: 5.8,
-            colSpan: 8,
-            obj: contrib.table,
-            opts: {
-                keys: true,
-                interactive: true,
-                columnSpacing: 1,
-                columnSpacing: 10,
-                columnWidth: [20, 35, 20, 20],
-                label: ' Holding Funds ',
-                border: {type: 'line', fg: 'cyan'},
-                width: '100%',
-                height: '100%'
-            }
-        },
-        {
-            id: 'progress',
-            row: 0,
-            col: 8,
-            rowSpan: 2,
-            colSpan: 4,
-            obj: contrib.gauge,
-            opts: {
-                label: ' Progress ',
-                stroke: 'green',
-                fill: 'white',
-                padding: 0
-            }
-        },
-        {
-            id: 'line',
-            row: 6,
-            col: 0,
-            rowSpan: 6,
-            colSpan: 12,
-            obj: contrib.line,
-            opts: {
-                label: ' Stock Chart ',  
-                showLegend: true,
-                showNthLabel:10,
-                legend: {
-                    width: 20
-                },
-            }
-        },
-        {
-            id: 'summary',
-            row: 2,
-            col: 8,
-            rowSpan: 4,
-            colSpan: 4,
-            obj: blessed.text,
-            opts: {
-                padding: 3,
-                style: {fg: 'green'},
-                label: ' Summary ',
-                tags: true,
-                border: {type: 'line', fg: 'cyan'},
-            }
-        }
-    ]
-    // 初始化组件
-    this.widgets = {}
-    for(var widget of widgetsCfg) {
-        this.widgets[widget.id] = grid.set(widget.row, widget.col, widget.rowSpan, widget.colSpan, widget.obj, widget.opts)
+    if (!(this instanceof FundMan)) {
+        return new FundMan(opts)
     }
 
-    // 消息提示框
-    this.messageBox = blessed.message({
-        parent: this.screen,
-        border: 'line',
-        height: 'shrink',
-        width: 'half',
-        top: 'center',
-        left: 'center',
-        label: ' {blue-fg}Tips{/blue-fg} ',
-        tags: true,
-        keys: true,
-        hidden: true,
-        vi: true 
-    })
-
-    this.loader = blessed.loading(
-        {
-            parent: this.screen,
-            border: 'line',
-            height: 'shrink',
-            width: 'half',
-            // height: '10%',
-            top: 'center',
-            left: 'center',
-            label: ' {blue-fg} Loading...{/} ',
-            keys: true,
-            tags: true,
-            hidden: true,
-            vi: true
-        }
-    )
-  
+    let self = this
+    this.eventBus = new events.EventEmitter()
+    this.screen = null
     this.done = 0
     this.tasks = []
     this.minIncome = Infinity
@@ -203,11 +115,130 @@ function FundMan(opts) {
     this.todayIncomeSummary = 0
     this.totalIncomeSummary = 0
     this.totalInvestment = 0
+    this.lastError = null
+    this.lastSelectedIndex = 0
+    this.linesSeries = []
+    this.opts = opts
 
-    var fetchJson = bent('http://dp.jr.jd.com/service/fundValuation', 'GET', 'json', 200)
+    this.init = function (opts){
+        opts = opts || self.opts
+        self.screen = blessed.screen({
+            smartCSR: true,
+            fullUnicode: true,
+            debug: opts.debug || false,
+            title: opts.title || 'Fundman'
+        })
+        var grid = new contrib.grid({rows: opts.rows, cols: opts.cols, screen: self.screen})
+
+        var widgetsCfg =  [
+            {
+                id: 'table',
+                row: 0,
+                col: 0,
+                rowSpan: 5.8,
+                colSpan: 8,
+                obj: contrib.table,
+                opts: {
+                    keys: true,
+                    interactive: true,
+                    columnSpacing: 1,
+                    columnSpacing: 10,
+                    columnWidth: [24, 35, 20, 20],
+                    label: ' Holding Funds ',
+                    border: {type: 'line', fg: 'cyan'},
+                    width: '100%',
+                    height: '100%'
+                }
+            },
+            {
+                id: 'progress',
+                row: 0,
+                col: 8,
+                rowSpan: 2,
+                colSpan: 4,
+                obj: contrib.gauge,
+                opts: {
+                    label: ' Progress ',
+                    stroke: 'green',
+                    fill: 'white',
+                    padding: 0
+                }
+            },
+            {
+                id: 'line',
+                row: 6,
+                col: 0,
+                rowSpan: 6,
+                colSpan: 12,
+                obj: contrib.line,
+                opts: {
+                    label: ' Stock Chart ',  
+                    showLegend: true,
+                    showNthLabel:10,
+                    legend: {
+                        width: 20
+                    },
+                }
+            },
+            {
+                id: 'summary',
+                row: 2,
+                col: 8,
+                rowSpan: 4,
+                colSpan: 4,
+                obj: blessed.text,
+                opts: {
+                    padding: 3,
+                    style: {fg: 'green'},
+                    label: ' Summary ',
+                    tags: true,
+                    border: {type: 'line', fg: 'cyan'},
+                }
+            }
+        ]
+        // 初始化组件
+        this.widgets = {}
+        for(var widget of widgetsCfg) {
+            self.widgets[widget.id] = grid.set(widget.row, widget.col, widget.rowSpan, widget.colSpan, widget.obj, widget.opts)
+        }
+
+        // 消息提示框
+        self.messageBox = blessed.message({
+            parent: self.screen,
+            border: 'line',
+            height: 'shrink',
+            width: 'half',
+            top: 'center',
+            left: 'center',
+            label: ' {blue-fg}Tips{/blue-fg} ',
+            tags: true,
+            keys: true,
+            hidden: true,
+            vi: true,
+            padding: 2
+        })
+        self.loader = blessed.loading(
+            {
+                parent: self.screen,
+                border: 'line',
+                height: 'shrink',
+                width: 'half',
+                // height: '10%',
+                top: 'center',
+                left: 'center',
+                label: ' {blue-fg} Loading...{/} ',
+                keys: true,
+                tags: true,
+                hidden: true,
+                vi: true
+            }
+        )
+
+        self.initEvent()
+    }
 
     this.createTask = function(fund) {
-        return fetchJson(`/${fund.code}.do`).then(resp => {
+        return fetchJsonWithRetry(`http://dp.jr.jd.com/service/fundValuation/${fund.code}.do`, 5).then(resp => {
             resp = resp[0]
             var rate = +resp.currentRating || 0
             var nowPrice = resp.currentNav || resp.fundNav
@@ -236,9 +267,11 @@ function FundMan(opts) {
                 minY: Math.min(...series)
             }
 
-            this.eventBus.emit('task finished', r)
+            self.eventBus.emit('task finished', r)
 
             return r
+        }).catch(e => {
+            self.lastError = e
         })
     }
 
@@ -262,19 +295,37 @@ function FundMan(opts) {
         }
         return ranges
     }
-    
-    this.eventBus.on('task finished', function(resp) {
-        self.done += 1;
-        var progess = self.widgets.progress
-        // 更新进度表
-        if (progess && self.tasks.length) {
-            progess.setPercent(self.done / self.tasks.length)
-            self.screen.render()
-        }
-    })
 
-    this.lastSelectedIndex = 0
-    this.linesSeries = []
+    this.initEvent = function() {
+        self.eventBus.on('task finished', function(resp) {
+            self.done += 1;
+            var progess = self.widgets.progress
+            // 更新进度表
+            if (progess && self.tasks.length) {
+                progess.setPercent(self.done / self.tasks.length)
+                self.screen.render()
+            }
+        })
+        self.widgets.table.rows.on('select', function(item, index) {
+            self.refreshLineChart(index)
+        })
+    
+        self.screen.key('?', function(){
+            self.messageBox.display('{yellow-fg}你可以通过上下方向键选择对应的基金按回车键(enter)即可查看走势图^_^{/yellow-fg}\n\n\t\tCode by {underline}{bold}shellvon{/}({blue-fg}https://von.sh{/})', 5)
+            self.screen.render()
+        })
+    
+        self.screen.key(['escape', 'q', 'C-c'], (ch, key) => {
+            return process.exit(0);
+        })
+
+        self.screen.on('resize', function() {
+            for(var widget of self.widgets) {
+                widget.emit('attach')
+            }
+            self.screen.render()
+        })
+    }
 
     this.refreshLineChart = function(index) {
         if (index !== undefined) {
@@ -287,32 +338,11 @@ function FundMan(opts) {
         }
     }
 
-    this.widgets.table.rows.on('select', function(item, index) {
-        self.refreshLineChart(index)
-    })
-
-    this.screen.key('?', function(){
-        self.messageBox.display('{yellow-fg}你可以通过上下方向键选择对应的基金按回车键(enter)即可查看走势图^_^{/yellow-fg}\n\t\tCode by {underline}{bold}shellvon{/}', 5)
-        self.screen.render()
-    })
-
-    this.screen.key(['escape', 'q', 'C-c'], (ch, key) => {
-        return process.exit(0);
-    })
-
-    
-    this.screen.on('resize', function() {
-        for(var widget of self.widgets) {
-            widget.emit('attach')
-        }
-        self.screen.render()
-    })
-
     return self
 }
 
-
 FundMan.prototype.start = function(funds, interval = 5) {
+    this.init()
     this.loader.load('{bold}首次运行, 数据加载中, 请稍后...{/bold}')
     this.mainloop(funds)
     setInterval(() => this.mainloop(funds), interval * 1e3)
@@ -320,18 +350,18 @@ FundMan.prototype.start = function(funds, interval = 5) {
 
 FundMan.prototype.mainloop = function(funds) {
     this.done = 0
-    this.tasks = []
     this.isTradeTime = false
     this.todayIncomeSummary = this.totalIncomeSummary = this.totalInvestment = 0
     let self = this
-    for (var fund of funds) {
-        var task = this.createTask(fund)
-        this.tasks.push(task)
-    }
+    this.lastError = null
+    self.tasks = [...new Map(funds.map(el => [el.code, el])).values()].map(fund => this.createTask(fund))
     Promise.all(this.tasks).then(function (funds) {
         var tableRows = [], linesSeries = []
         var isTradeTime = false
         for (var fund of funds) {
+            if (!fund) {
+                continue
+            }
             tableRows.push(
                 [
                     `${fund.name}(${fund.code})`,
@@ -346,7 +376,7 @@ FundMan.prototype.mainloop = function(funds) {
                 x: fund.timeRanges,
                 y: fund.series, // record.slice(0, ~~ (100 * Math.random())),
                 minY: fund.minY,
-                title: `${fund.name}(${fund.code})`,
+                title: `${fund.name.trim()}(${fund.code})`,
             })
         }
         self.minIncome = Math.min(self.minIncome, self.todayIncomeSummary)
@@ -360,6 +390,10 @@ FundMan.prototype.mainloop = function(funds) {
                 `累计收益率: ${numFmt(self.totalIncomeSummary * 100 / self.totalInvestment, {sign: true, percent: true})}`,
                 `最后更新时间: {bold}${new Date().toLocaleString()}{/}`
         ] : [`{underline}{red-fg}{bold}当前时间为非交易时间段,请在交易时间范围内使用哦{/}`]
+        if (self.lastError) {
+            var m = self.lastError.message || self.lastError.toString()
+            summaryTextArr.push(`{red-fg}{bold}${m}{/}`)
+        }
         self.widgets.summary.setContent(summaryTextArr.join('\n'))
         self.widgets.table.focus()
         self.refreshLineChart()
@@ -368,40 +402,126 @@ FundMan.prototype.mainloop = function(funds) {
     })
 }
 
-// 获取配置文件.
-let cfg = `${process.cwd()}/config.json`
-let argv = process.argv.slice(2, )
-for(let i = 0, l = argv.length; i < l; i ++) {
-    if (argv[i] == '-h') {
-        console.log(`Usage: ${process.argv[1]} -c <config file>\n\t\tdefault config file is: ${cfg}`)
-        process.exit(0)
+const ask = function (app) {
+    let delay = (val, ms) => new Promise((resolve) => setTimeout(() => resolve(val), ms))
+    let funds  = []
+    let questions = [
+        {
+            type: 'autocomplete',
+            message: '请输入您所持有的基金代码,名称或简拼:',
+            name: 'fund',
+            source: (answersSoFar, input) => {
+                return delay(fuzzy.filter(input || '', funddb, {extract: (el) => el.join('\n')})
+                .filter(el => funds.findIndex(e => e.code === el.original[0]) == -1)
+                .map(el => {
+                    let display = `${el.original[2]}(${el.original[0]})`
+                    return {
+                        name: display,
+                        short: display,
+                        value: {
+                            name: el.original[2],
+                            code: el.original[0]
+                        }
+                    }
+                }), 300)
+            }
+        },
+        {
+            type: 'number',
+            message: '请输入您所持有的持仓成本价(便于您计算收益):',
+            default: 0.00,
+            name: 'cost',
+        },
+        {
+            type: 'number',
+            message: '请输入您所持有的份额(便于您计算收益):',
+            default: 0.00,
+            name: 'holdings'
+        },
+        {
+            type: 'confirm',
+            message: '是否还需要继续添加新的基金?(默认Yes)',
+            default: true,
+            name: 'askAgain'
+        }
+    ]
+
+    let askRecursive = () => {
+        inquirer.prompt(questions).then(answers => {
+            funds.push(
+                {
+                    name:  answers.fund.name,
+                    code: answers.fund.code,
+                    holdings: answers.holdings,
+                    cost: answers.cost,
+                    time: + new Date()
+                }
+            )
+            if (answers.askAgain) {
+                return askRecursive()
+            }
+            console.log('\n')
+            console.log(util.inspect(funds, {colors: true, depth: null}))
+            inquirer.prompt([{
+                type: 'confirm',
+                name: 'save',
+                message: '您需要将刚刚的基金数据保存至文件以备下一次使用吗?(默认Yes)',
+                default: true
+            }, {
+                type: 'input',
+                message: '请输入您的文件名(请确保原文件不存在,否则会保存失败):',
+                name: 'fname',
+                default: 'config.json',
+                when: function (answer) {
+                    return answer.save
+                }
+            }]).then(answer => {
+                if (answer.save) {
+                    fs.writeFile(answer.fname, JSON.stringify(funds, null, 4), {flag: 'wx', encoding: 'utf-8'}, (err) => {
+                        if (err) {
+                            return console.error(chalk.red('写入配置文件时出错~'))
+                        } else {
+                            console.log(chalk.greenBright(`已成本写入配置到文件:${chalk.bold(answers.fname)}`))
+                        }
+                    })
+                }
+                app.start(funds)
+            })
+        })
     }
-    if (argv[i] == '-c') {
-        cfg = argv[i + 1]
-    }
-    if (l == 1) {
-        cfg = argv[0]
-    }
+
+    return askRecursive()
 }
 
-if (!cfg) {
-    console.log('config file is required.')
-    process.exit(1)
+const run = function() {
+    const cmd = process.argv[2]
+    if (cmd == '-h' || cmd == '--help') {
+        console.log(`Usage: ${process.argv[1]} <config-file>\n\t\tdefault config file is: ${process.cwd()}/config.json`)
+        process.exit(1)
+    } else if (/^--?\w+$/.test(cmd)) {
+        console.log(`Invalid cmd/options\nUsage: ${process.argv[1]} <config-file>\n\t\tdefault config file is: ${process.cwd()}/config.json`)
+    }
+    let fname = cmd || `${__dirname}/config.json`
+
+    console.log(chalk.greenBright(`尝试使用配置文件: ${chalk.red(fname)}`))
+
+    const app = new FundMan({
+        rows: 12,
+        cols: 12,
+        title: 'Richman',
+        debug: false,
+    })
+
+    readFile(fname).then(content => {
+       app.start(JSON.parse(content))
+    }).catch(err => {
+        if (err.code !== 'ENOENT') {
+            return console.log(chalk.bgRed.bold(err.message))
+            // throw err
+        }
+        console.log(chalk.yellowBright('Oops,您所指定的配置文件不存在,来新建吧'))
+        ask(app)
+    })
 }
 
-if (!fs.existsSync(cfg)) {
-    console.log('config file is missing.....')
-    process.exit(1)
-}
-
-const funds = require(cfg)
-
-const app = new FundMan({
-    rows: 12,
-    cols: 12,
-    title: 'Richman',
-    debug: false,
-    events: [],
-})
-
-app.start(funds)
+run()
