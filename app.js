@@ -143,7 +143,7 @@ function FundMan(opts) {
                     interactive: true,
                     columnSpacing: 1,
                     columnSpacing: 10,
-                    columnWidth: [24, 35, 20, 20],
+                    columnWidth: [24, 40, 20, 20],
                     label: ' Holding Funds ',
                     border: {type: 'line', fg: 'cyan'},
                     width: '100%',
@@ -354,7 +354,7 @@ FundMan.prototype.mainloop = function(funds) {
     this.todayIncomeSummary = this.totalIncomeSummary = this.totalInvestment = 0
     let self = this
     this.lastError = null
-    self.tasks = [...new Map(funds.map(el => [el.code, el])).values()].map(fund => this.createTask(fund))
+    self.tasks = funds.map(fund => this.createTask(fund))
     Promise.all(this.tasks).then(function (funds) {
         var tableRows = [], linesSeries = []
         var isTradeTime = false
@@ -412,7 +412,7 @@ const ask = function (app) {
             name: 'fund',
             source: (answersSoFar, input) => {
                 return delay(fuzzy.filter(input || '', funddb, {extract: (el) => el.join('\n')})
-                .filter(el => funds.findIndex(e => e.code === el.original[0]) == -1)
+                //.filter(el => funds.findIndex(e => e.code === el.original[0]) == -1)
                 .map(el => {
                     let display = `${el.original[2]}(${el.original[0]})`
                     return {
